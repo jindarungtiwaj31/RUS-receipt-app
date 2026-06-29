@@ -812,9 +812,17 @@
             </button>
           </div>
           <div class="section" style="margin:16px 0 0; box-shadow:none;">
-            <label class="field">รหัสผู้ใช้งาน 4 หลัก
+            <label class="field" id="localUserCodeField">รหัสผู้ใช้งาน 4 หลัก
               <input id="userCodeInput" inputmode="numeric" maxlength="4" placeholder="กรอกรหัสผู้ใช้งาน">
             </label>
+            <div class="grid two hidden" id="cloudUserFields">
+              <label class="field">อีเมลผู้ใช้งาน
+                <input id="cloudUserEmail" type="email" autocomplete="username" placeholder="user@example.com">
+              </label>
+              <label class="field">Password
+                <input id="cloudUserPassword" type="password" autocomplete="current-password" placeholder="กรอกรหัสผ่าน">
+              </label>
+            </div>
             <div class="summary-bar">
               <span id="userLoginHint" class="pill">กรอกรหัสที่ Admin กำหนดไว้</span>
               <button class="button success" id="userLoginBtn">เข้าสู่ระบบ User</button>
@@ -993,8 +1001,12 @@
 
   <div id="toast" class="toast hidden"></div>
 
+  <script src="supabase-config.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <script>
     const STORE_KEY = "rmut_receipt_app_v1";
+    const CLOUD_STATE_ID = "main";
+    const SUPABASE_SETTINGS = window.RECEIPT_APP_SUPABASE || { url: "", anonKey: "" };
     const todayIso = () => new Date().toISOString().slice(0, 10);
     const timeNow = () => new Date().toTimeString().slice(0, 5);
     const baht = new Intl.NumberFormat("th-TH", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -1026,10 +1038,102 @@
     let db = loadDb();
     let session = { role: null, user: null, adminTab: "dashboard", printBack: "user" };
     let pendingCancelId = null;
+    let cloudClient = null;
+    let cloudProfile = null;
 
     function clone(value) {
       if (typeof structuredClone === "function") return structuredClone(value);
       return JSON.parse(JSON.stringify(value));
+    }
+
+    function isCloudMode() {
+      return Boolean(SUPABASE_SETTINGS.url && SUPABASE_SETTINGS.anonKey);
+    }
+
+    function getCloudClient() {
+      if (!isCloudMode()) return null;
+      if (!window.supabase) throw new Error("โหลด Supabase client ไม่สำเร็จ กรุณาตรวจสอบอินเทอร์เน็ต");
+      if (!cloudClient) {
+        cloudClient = window.supabase.createClient(SUPABASE_SETTINGS.url, SUPABASE_SETTINGS.anonKey);
+      }
+      return cloudClient;
+    }
+
+    function syncAuthModeUI() {
+      const cloud = isCloudMode();
+      document.getElementById("localUserCodeField")?.classList.toggle("hidden", cloud);
+      document.getElementById("cloudUserFields")?.classList.toggle("hidden", !cloud);
+      document.getElementById("userLoginHint").textContent = cloud
+        ? "เข้าสู่ระบบด้วยบัญชีที่สร้างใน Supabase"
+        : "กรอกรหัสที่ Admin กำหนดไว้";
+      document.getElementById("userLoginHint").classList.remove("cancelled");
+    }
+
+    async function cloudSignIn(email, password, expectedRole) {
+      const client = getCloudClient();
+      const { data, error } = await client.auth.signInWithPassword({ email, password });
+      if (error) throw new Error("อีเมลหรือรหัสผ่านไม่ถูกต้อง");
+      const user = data.user;
+      const { data: profile, error: profileError } = await client
+        .from("profiles")
+        .select("user_id, role, display_name, staff_code")
+        .eq("user_id", user.id)
+        .single();
+      if (profileError || !profile) throw new Error("บัญชีนี้ยังไม่ได้กำหนดสิทธิ์ในตาราง profiles");
+      if (expectedRole === "admin" && profile.role !== "admin") throw new Error("บัญชีนี้ไม่มีสิทธิ์ Admin");
+      if (expectedRole === "user" && !["user", "admin"].includes(profile.role)) throw new Error("บัญชีนี้ไม่มีสิทธิ์ User");
+      cloudProfile = { ...profile, email: user.email };
+      return cloudProfile;
+    }
+
+    async function cloudSignOut() {
+      if (cloudClient) await cloudClient.auth.signOut();
+      cloudProfile = null;
+    }
+
+    async function loadCloudDb() {
+      const client = getCloudClient();
+      const { data, error } = await client
+        .from("app_state")
+        .select("data")
+        .eq("id", CLOUD_STATE_ID)
+        .maybeSingle();
+      if (error) throw new Error(`โหลดฐานข้อมูลกลางไม่สำเร็จ: ${error.message}`);
+      if (data?.data) {
+        db = normalizeDb({ ...clone(defaults), ...data.data });
+      } else {
+        db = normalizeDb(clone(defaults));
+        await saveCloudDb();
+      }
+      localStorage.setItem(STORE_KEY, JSON.stringify(db));
+      return db;
+    }
+
+    async function saveCloudDb() {
+      if (!isCloudMode() || !cloudProfile) return;
+      const client = getCloudClient();
+      const payload = { ...clone(db), admin: clone(defaults.admin) };
+      const { error } = await client
+        .from("app_state")
+        .upsert({ id: CLOUD_STATE_ID, data: payload, updated_at: new Date().toISOString() });
+      if (error) throw new Error(`บันทึกฐานข้อมูลกลางไม่สำเร็จ: ${error.message}`);
+    }
+
+    async function issueReceiptOnCloud(receiptDraft) {
+      const client = getCloudClient();
+      const { data, error } = await client.rpc("issue_receipt", { p_receipt: receiptDraft });
+      if (error) throw new Error(error.message);
+      db = normalizeDb({ ...clone(defaults), ...data.state });
+      localStorage.setItem(STORE_KEY, JSON.stringify(db));
+      return normalizeReceipt(data.receipt);
+    }
+
+    async function cancelReceiptOnCloud(id, reason) {
+      const client = getCloudClient();
+      const { data, error } = await client.rpc("cancel_receipt", { p_receipt_id: id, p_reason: reason });
+      if (error) throw new Error(error.message);
+      db = normalizeDb({ ...clone(defaults), ...data.state });
+      localStorage.setItem(STORE_KEY, JSON.stringify(db));
     }
 
     function loadDb() {
@@ -1051,6 +1155,9 @@
     function saveDb() {
       try {
         localStorage.setItem(STORE_KEY, JSON.stringify(db));
+        if (isCloudMode() && cloudProfile) {
+          saveCloudDb().catch(error => showToast(error.message));
+        }
       } catch {
         showToast("เบราว์เซอร์ไม่อนุญาตให้บันทึกข้อมูล กรุณาเปิดผ่าน localhost");
       }
@@ -1156,6 +1263,14 @@
     }
 
     function syncAdminLoginState() {
+      if (isCloudMode()) {
+        document.getElementById("adminModalTitle").textContent = "เข้าสู่ระบบ Admin";
+        document.getElementById("adminLoginNote").textContent = "เข้าสู่ระบบด้วยอีเมลและรหัสผ่านจาก Supabase";
+        document.getElementById("adminLoginBtn").textContent = "เข้าสู่ระบบ";
+        document.getElementById("adminUsername").value = "";
+        document.getElementById("adminPassword").value = "";
+        return;
+      }
       const needsSetup = !hasAdminCredentials();
       document.getElementById("adminModalTitle").textContent = needsSetup ? "ตั้งค่า Admin ครั้งแรก" : "เข้าสู่ระบบ Admin";
       document.getElementById("adminLoginNote").textContent = needsSetup
@@ -1190,6 +1305,7 @@
       who.className = "pill";
       who.textContent = session.role === "admin" ? "Admin" : session.user.name;
       const home = button("หน้าหลัก", "secondary", () => {
+        cloudSignOut();
         session = { role: null, user: null, adminTab: "dashboard", printBack: "user" };
         setView("landingView");
       });
@@ -1295,6 +1411,7 @@
     }
 
     function initLanding() {
+      syncAuthModeUI();
       document.getElementById("openAdminLogin").addEventListener("click", () => {
         syncAdminLoginState();
         document.getElementById("adminModal").classList.add("open");
@@ -1316,11 +1433,28 @@
       document.getElementById("userCodeInput").addEventListener("keydown", e => {
         if (e.key === "Enter") userLogin();
       });
+      document.getElementById("cloudUserEmail").addEventListener("keydown", e => {
+        if (e.key === "Enter") userLogin();
+      });
+      document.getElementById("cloudUserPassword").addEventListener("keydown", e => {
+        if (e.key === "Enter") userLogin();
+      });
     }
 
-    function adminLogin() {
+    async function adminLogin() {
       const username = document.getElementById("adminUsername").value.trim();
       const password = document.getElementById("adminPassword").value;
+      if (isCloudMode()) {
+        try {
+          await cloudSignIn(username, password, "admin");
+          await loadCloudDb();
+          startAdminSession();
+          showToast("เชื่อมต่อฐานข้อมูลกลางแล้ว");
+        } catch (error) {
+          showToast(error.message);
+        }
+        return;
+      }
       if (!hasAdminCredentials()) {
         if (!username || password.length < 6) {
           showToast("กรุณาตั้ง Username และ Password อย่างน้อย 6 ตัวอักษร");
@@ -1356,7 +1490,27 @@
         }
     }
 
-    function userLogin() {
+    async function userLogin() {
+      if (isCloudMode()) {
+        try {
+          const email = document.getElementById("cloudUserEmail").value.trim();
+          const password = document.getElementById("cloudUserPassword").value;
+          const profile = await cloudSignIn(email, password, "user");
+          await loadCloudDb();
+          session.role = "user";
+          session.user = {
+            code: profile.staff_code || "",
+            name: profile.display_name || profile.email || "User"
+          };
+          renderUserForm();
+          setView("userView");
+          showToast("เชื่อมต่อฐานข้อมูลกลางแล้ว");
+        } catch (error) {
+          document.getElementById("userLoginHint").textContent = error.message;
+          document.getElementById("userLoginHint").classList.add("cancelled");
+        }
+        return;
+      }
       const code = document.getElementById("userCodeInput").value.trim();
       const found = db.users.find(u => u.code === code);
       if (!/^\d{4}$/.test(code) || !found) {
@@ -1471,17 +1625,16 @@
       if (!payer) return showToast("กรุณากรอกชื่อผู้ชำระ");
       if (!lines.length) return showToast("กรุณาเพิ่มรายการชำระเงินและจำนวนเงิน");
       status.textContent = "กำลังบันทึก...";
-      setTimeout(() => {
+      setTimeout(async () => {
         try {
-          const number = nextReceiptNumber();
           const total = lines.reduce((sum, line) => sum + line.amount, 0);
           const method = document.getElementById("paymentMethod").value;
-          const receipt = {
+          const receiptDraft = {
             id: makeId(),
             date: todayIso(),
             time: timeNow(),
-            bookNo: number.bookNo,
-            receiptNo: number.receiptNo,
+            bookNo: "",
+            receiptNo: "",
             payerType: document.getElementById("payerType").value,
             payerName: payer,
             detail1: document.getElementById("detail1").value.trim(),
@@ -1499,8 +1652,15 @@
             status: "ปกติ",
             cancelReason: ""
           };
-          db.receipts.push(receipt);
-          saveDb();
+          let receipt = receiptDraft;
+          if (isCloudMode()) {
+            receipt = await issueReceiptOnCloud(receiptDraft);
+          } else {
+            const number = nextReceiptNumber();
+            receipt = { ...receiptDraft, bookNo: number.bookNo, receiptNo: number.receiptNo };
+            db.receipts.push(receipt);
+            saveDb();
+          }
           status.textContent = "บันทึกสำเร็จ";
           showToast(`ออกใบเสร็จ ${receipt.bookNo}/${receipt.receiptNo} สำเร็จ`);
           renderReceiptPrint(receipt, "user");
@@ -1523,17 +1683,25 @@
       document.getElementById("cancelReason").focus();
     }
 
-    function confirmCancelReceipt() {
+    async function confirmCancelReceipt() {
       const reason = document.getElementById("cancelReason").value.trim();
       if (!reason) return showToast("กรุณาระบุหมายเหตุการยกเลิก");
       const receipt = db.receipts.find(r => r.id === pendingCancelId);
       if (!receipt) return;
-      receipt.status = "ยกเลิก";
-      receipt.cancelReason = reason;
-      saveDb();
-      document.getElementById("cancelModal").classList.remove("open");
-      showToast("ยกเลิกใบเสร็จเรียบร้อย");
-      if (session.role === "admin") renderAdmin();
+      try {
+        if (isCloudMode()) {
+          await cancelReceiptOnCloud(receipt.id, reason);
+        } else {
+          receipt.status = "ยกเลิก";
+          receipt.cancelReason = reason;
+          saveDb();
+        }
+        document.getElementById("cancelModal").classList.remove("open");
+        showToast("ยกเลิกใบเสร็จเรียบร้อย");
+        if (session.role === "admin") renderAdmin();
+      } catch (error) {
+        showToast(error.message);
+      }
     }
 
     const adminTabs = [
