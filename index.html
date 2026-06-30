@@ -45,8 +45,8 @@
     }
 
     .topbar {
-      min-height: 64px;
-      padding: 12px clamp(16px, 4vw, 38px);
+      min-height: 78px;
+      padding: 14px clamp(22px, 4.4vw, 48px);
       display: flex;
       gap: 14px;
       align-items: center;
@@ -66,14 +66,14 @@
     }
 
     .brand img {
-      width: 42px;
-      height: 42px;
+      width: 54px;
+      height: 54px;
       object-fit: contain;
     }
 
     .brand strong {
       display: block;
-      font-size: 18px;
+      font-size: 22px;
       line-height: 1.2;
       white-space: nowrap;
       overflow: hidden;
@@ -83,7 +83,7 @@
     .brand span {
       display: block;
       color: var(--muted);
-      font-size: 12px;
+      font-size: 14px;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
@@ -98,7 +98,7 @@
     }
 
     main {
-      width: min(1320px, 100%);
+      width: min(1500px, 100%);
       margin: 0 auto;
       padding: clamp(16px, 3vw, 34px);
       flex: 1;
@@ -107,9 +107,14 @@
     .landing {
       min-height: calc(100vh - 128px);
       display: grid;
-      grid-template-columns: minmax(280px, .95fr) minmax(300px, 1.05fr);
+      grid-template-columns: minmax(340px, 760px);
       align-items: center;
+      justify-content: center;
       gap: clamp(22px, 5vw, 72px);
+    }
+
+    .hero-copy {
+      display: none;
     }
 
     .hero-copy h1 {
@@ -131,7 +136,8 @@
       border: 1px solid var(--line);
       border-radius: 8px;
       box-shadow: var(--shadow);
-      padding: clamp(18px, 3vw, 28px);
+      padding: clamp(22px, 3.4vw, 36px);
+      width: 100%;
     }
 
     .entry-grid {
@@ -358,13 +364,26 @@
 
     .line-item {
       display: grid;
-      grid-template-columns: 1.1fr 1.2fr 140px 42px;
+      grid-template-columns: 1fr 1.65fr 170px 52px;
       gap: 8px;
       align-items: end;
       padding: 10px;
       border: 1px solid #dde5ef;
       border-radius: 8px;
       background: #fbfcff;
+    }
+
+    #userView > .section {
+      padding: clamp(22px, 3vw, 30px);
+    }
+
+    #userView .section .section {
+      padding: clamp(18px, 2.4vw, 24px);
+    }
+
+    .live-pill {
+      background: #e9fff8;
+      color: #08705d;
     }
 
     .summary-bar {
@@ -790,10 +809,6 @@
 
     <main>
       <section id="landingView" class="landing">
-        <div class="hero-copy">
-          <h1>ออกใบเสร็จ รับชำระ และตรวจรายงานในระบบเดียว</h1>
-          <p>แยกสิทธิ์ Admin และ User พร้อมเลขใบเสร็จอัตโนมัติ ยกเลิกใบเสร็จย้อนหลัง รายงาน และแบบพิมพ์ A5 สำหรับต้นฉบับกับสำเนา</p>
-        </div>
         <div class="entry-panel">
           <div class="section-header">
             <div>
@@ -1040,6 +1055,9 @@
     let pendingCancelId = null;
     let cloudClient = null;
     let cloudProfile = null;
+    let liveRefreshTimer = null;
+    let liveRefreshBusy = false;
+    let lastDbSignature = "";
 
     function clone(value) {
       if (typeof structuredClone === "function") return structuredClone(value);
@@ -1076,12 +1094,13 @@
       const user = data.user;
       const { data: profile, error: profileError } = await client
         .from("profiles")
-        .select("user_id, role, display_name, staff_code")
+        .select("user_id, role, display_name, staff_code, active")
         .eq("user_id", user.id)
         .single();
       if (profileError || !profile) throw new Error("บัญชีนี้ยังไม่ได้กำหนดสิทธิ์ในตาราง profiles");
       if (expectedRole === "admin" && profile.role !== "admin") throw new Error("บัญชีนี้ไม่มีสิทธิ์ Admin");
       if (expectedRole === "user" && !["user", "admin"].includes(profile.role)) throw new Error("บัญชีนี้ไม่มีสิทธิ์ User");
+      if (profile.active === false) throw new Error("บัญชีนี้ถูกปิดการใช้งานแล้ว");
       cloudProfile = { ...profile, email: user.email };
       return cloudProfile;
     }
@@ -1155,6 +1174,7 @@
     function saveDb() {
       try {
         localStorage.setItem(STORE_KEY, JSON.stringify(db));
+        lastDbSignature = dataSignature();
         if (isCloudMode() && cloudProfile) {
           saveCloudDb().catch(error => showToast(error.message));
         }
@@ -1165,7 +1185,7 @@
 
     function normalizeDb(data) {
       data.admin = normalizeAdmin(data.admin);
-      data.users = Array.isArray(data.users) ? data.users : clone(defaults.users);
+      data.users = Array.isArray(data.users) ? data.users.map(normalizeUser) : clone(defaults.users);
       data.titles = Array.isArray(data.titles) ? data.titles : clone(defaults.titles);
       data.paymentItems = Array.isArray(data.paymentItems) ? data.paymentItems : clone(defaults.paymentItems);
       data.projects = Array.isArray(data.projects) ? data.projects.map(normalizeProject) : clone(defaults.projects);
@@ -1187,6 +1207,15 @@
     function hasAdminCredentials(admin) {
       const account = admin || db.admin || {};
       return Boolean(String(account.username || "").trim() && String(account.password || ""));
+    }
+
+    function normalizeUser(user) {
+      if (typeof user === "string") return { code: user, name: user, active: true };
+      return {
+        code: String(user?.code || "").trim(),
+        name: String(user?.name || "").trim() || "-",
+        active: user?.active !== false
+      };
     }
 
     function normalizeBook(book) {
@@ -1289,11 +1318,25 @@
       showToast.timer = setTimeout(() => el.classList.add("hidden"), 2600);
     }
 
+    function dataSignature(value = db) {
+      return JSON.stringify({
+        users: value.users,
+        titles: value.titles,
+        paymentItems: value.paymentItems,
+        projects: value.projects,
+        payerBanks: value.payerBanks,
+        universityBanks: value.universityBanks,
+        books: value.books,
+        receipts: value.receipts
+      });
+    }
+
     function setView(name) {
       ["landingView", "userView", "adminView", "printView"].forEach(id => {
         document.getElementById(id).classList.toggle("hidden", id !== name);
       });
       renderTopActions();
+      startLiveDataRefresh();
       requestAnimationFrame(() => window.scrollTo({ top: 0, left: 0 }));
     }
 
@@ -1307,9 +1350,51 @@
       const home = button("หน้าหลัก", "secondary", () => {
         cloudSignOut();
         session = { role: null, user: null, adminTab: "dashboard", printBack: "user" };
+        startLiveDataRefresh();
         setView("landingView");
       });
       box.append(who, home);
+    }
+
+    function startLiveDataRefresh() {
+      clearInterval(liveRefreshTimer);
+      if (!session.role) return;
+      liveRefreshTimer = setInterval(() => refreshLiveData(), 3000);
+    }
+
+    function localSessionUserIsActive() {
+      if (isCloudMode() || session.role !== "user" || !session.user?.code) return true;
+      const current = db.users.find(user => user.code === session.user.code);
+      return Boolean(current && current.active !== false);
+    }
+
+    async function refreshLiveData() {
+      if (!session.role || liveRefreshBusy) return;
+      liveRefreshBusy = true;
+      try {
+        const before = lastDbSignature || dataSignature();
+        if (isCloudMode() && cloudProfile) await loadCloudDb();
+        else db = loadDb();
+        const after = dataSignature();
+        if (after !== before) {
+          lastDbSignature = after;
+          if (session.role === "admin" && !document.getElementById("adminView").classList.contains("hidden")) {
+            renderAdmin();
+          } else if (session.role === "user" && !document.getElementById("userView").classList.contains("hidden")) {
+            if (!localSessionUserIsActive()) {
+              showToast("รหัสของคุณถูกปิดการใช้งานแล้ว");
+              session = { role: null, user: null, adminTab: "dashboard", printBack: "user" };
+              setView("landingView");
+              return;
+            }
+            refreshUserSelectableData();
+          }
+        }
+      } catch (error) {
+        console.warn(error);
+      } finally {
+        liveRefreshBusy = false;
+      }
     }
 
     function button(text, type, handler) {
@@ -1476,6 +1561,7 @@
 
     function startAdminSession() {
         session.role = "admin";
+        lastDbSignature = dataSignature();
         document.getElementById("adminModal").classList.remove("open");
         try {
           renderAdmin();
@@ -1502,6 +1588,7 @@
             code: profile.staff_code || "",
             name: profile.display_name || profile.email || "User"
           };
+          lastDbSignature = dataSignature();
           renderUserForm();
           setView("userView");
           showToast("เชื่อมต่อฐานข้อมูลกลางแล้ว");
@@ -1518,8 +1605,14 @@
         document.getElementById("userLoginHint").classList.add("cancelled");
         return;
       }
+      if (found.active === false) {
+        document.getElementById("userLoginHint").textContent = "รหัสนี้ถูกปิดการใช้งานแล้ว";
+        document.getElementById("userLoginHint").classList.add("cancelled");
+        return;
+      }
       session.role = "user";
       session.user = found;
+      lastDbSignature = dataSignature();
       renderUserForm();
       setView("userView");
     }
@@ -1542,6 +1635,45 @@
       document.getElementById("transferDate").value = todayIso();
       document.getElementById("lineItems").innerHTML = "";
       addLineItem();
+      updateTotals();
+    }
+
+    function refreshUserSelectableData() {
+      const titleSelect = document.getElementById("titleSelect");
+      const payerBankSelect = document.getElementById("payerBankSelect");
+      const universityBankSelect = document.getElementById("universityBankSelect");
+      const titleValue = titleSelect?.value || "";
+      const payerBankValue = payerBankSelect?.value || "";
+      const universityBankValue = universityBankSelect?.value || "";
+
+      if (titleSelect) {
+        populateSelect(titleSelect, db.titles);
+        if (db.titles.includes(titleValue)) titleSelect.value = titleValue;
+      }
+      if (payerBankSelect) {
+        populateSelect(payerBankSelect, db.payerBanks);
+        if (db.payerBanks.includes(payerBankValue)) payerBankSelect.value = payerBankValue;
+      }
+      if (universityBankSelect) {
+        populateSelect(universityBankSelect, db.universityBanks, b => `${b.bank} - ${b.accountNo}`);
+        [...universityBankSelect.options].some(option => {
+          if (option.value === universityBankValue) {
+            universityBankSelect.value = universityBankValue;
+            return true;
+          }
+          return false;
+        });
+      }
+
+      document.querySelectorAll(".line-item").forEach(row => {
+        const payment = row.querySelector(".line-payment");
+        const project = row.querySelector(".line-project");
+        const paymentValue = payment.value;
+        const projectValue = project.value;
+        populateSelect(payment, db.paymentItems);
+        populateProjectSelect(project, projectValue);
+        if (db.paymentItems.includes(paymentValue)) payment.value = paymentValue;
+      });
       updateTotals();
     }
 
@@ -1622,6 +1754,7 @@
       const status = document.getElementById("saveStatus");
       const payer = buildPayerName();
       const lines = collectLines();
+      if (!localSessionUserIsActive()) return showToast("รหัสของคุณถูกปิดการใช้งานแล้ว");
       if (!payer) return showToast("กรุณากรอกชื่อผู้ชำระ");
       if (!lines.length) return showToast("กรุณาเพิ่มรายการชำระเงินและจำนวนเงิน");
       status.textContent = "กำลังบันทึก...";
@@ -1745,7 +1878,7 @@
       const net = normal.reduce((s, r) => s + r.total, 0);
       document.getElementById("adminContent").innerHTML = `
         <div class="section">
-          <div class="section-header"><div><h2>แดชบอร์ด</h2><p>สรุปภาพรวมใบเสร็จและรายการล่าสุด</p></div></div>
+          <div class="section-header"><div><h2>แดชบอร์ด</h2><p>สรุปภาพรวมใบเสร็จและรายการล่าสุด</p></div><span class="pill live-pill">อัปเดตอัตโนมัติ</span></div>
           <div class="stat-grid">
             ${stat("ใบเสร็จทั้งหมด", db.receipts.length)}
             ${stat("สถานะปกติ", normal.length)}
@@ -1770,12 +1903,13 @@
         ],
         rows: db.users,
         addLabel: "เพิ่ม User",
-        tableHeads: ["รหัส", "ชื่อ-นามสกุล"],
-        tableCells: u => [u.code, u.name],
+        tableHeads: ["รหัส", "ชื่อ-นามสกุล", "สถานะ"],
+        tableCells: u => [u.code, u.name, u.active === false ? "ปิด" : "เปิด"],
+        extraActions: (u, i) => `<button class="button ${u.active === false ? "success" : "secondary"} user-toggle" data-index="${i}" type="button">${u.active === false ? "เปิด" : "ปิด"}</button>`,
         onAdd: values => {
           if (!/^\d{4}$/.test(values.code)) return showToast("รหัส User ต้องเป็นตัวเลข 4 หลัก");
           if (db.users.some(u => u.code === values.code)) return showToast("รหัสนี้มีอยู่แล้ว");
-          db.users.push(values);
+          db.users.push({ ...values, active: true });
           saveDb();
           renderUsersAdmin();
         },
@@ -1786,6 +1920,15 @@
         }
       });
       bindCrudForm();
+      document.querySelectorAll(".user-toggle").forEach(btn => {
+        btn.addEventListener("click", () => {
+          const index = Number(btn.dataset.index);
+          const user = normalizeUser(db.users[index]);
+          db.users[index] = { ...user, active: !user.active };
+          saveDb();
+          renderUsersAdmin();
+        });
+      });
     }
 
     function renderMenusAdmin() {
@@ -1801,9 +1944,12 @@
 
     function listManager(key, label) {
       if (key === "projects") return projectListManager(label);
+      const note = key === "titles"
+        ? "ใส่เฉพาะคำนำหน้าชื่อ เช่น นาย, นาง, นางสาว, ดร. ไม่ต้องใส่ชื่อบุคคลหรือคำอื่น เพราะข้อมูลนี้จะแสดงในหน้าพิมพ์ใบเสร็จ"
+        : "เพิ่ม แก้ไข หรือลบรายการตั้งต้น";
       return `
         <div class="section" data-list="${key}">
-          <div class="section-header"><div><h2>${label}</h2><p>เพิ่ม แก้ไข หรือลบรายการตั้งต้น</p></div></div>
+          <div class="section-header"><div><h2>${label}</h2><p>${note}</p></div></div>
           <div class="summary-bar" style="border-top:0; margin-top:0; padding-top:0;">
             <input class="list-input" placeholder="${label}">
             <button class="button list-add" type="button">เพิ่ม</button>
@@ -2189,11 +2335,10 @@
         <div class="section">
           <div class="section-header">
             <div><h2>จัดการใบเสร็จ</h2><p>ตรวจสอบ พิมพ์ย้อนหลัง ยกเลิก และดูข้อมูลช่องทางชำระ</p></div>
-            <button class="button secondary" id="refreshReceipts">รีเฟรชข้อมูล</button>
+            <span class="pill live-pill">อัปเดตอัตโนมัติ</span>
           </div>
           ${receiptTable(db.receipts.slice().reverse(), true)}
         </div>`;
-      document.getElementById("refreshReceipts").addEventListener("click", renderReceiptsAdmin);
       bindReceiptAdminActions();
     }
 
@@ -2202,7 +2347,7 @@
         <div class="section">
           <div class="section-header">
             <div><h2>รายงาน</h2><p>กรองข้อมูล สรุปตามประเภทค่าใช้จ่าย และส่งออก PDF/Excel</p></div>
-            <button class="button secondary" id="refreshReports">รีเฟรชข้อมูล</button>
+            <span class="pill live-pill">อัปเดตอัตโนมัติ</span>
           </div>
           <div class="grid four">
             <label class="field">วันที่เริ่มต้น<input id="reportStart" type="date"></label>
@@ -2223,7 +2368,6 @@
         </div>`;
       document.getElementById("reportStart").value = todayIso();
       document.getElementById("reportEnd").value = todayIso();
-      document.getElementById("refreshReports").addEventListener("click", renderReportsAdmin);
       document.getElementById("applyReport").addEventListener("click", renderReportTables);
       document.getElementById("exportPdf").addEventListener("click", () => openReportPreview("pdf"));
       document.getElementById("exportExcel").addEventListener("click", () => openReportPreview("excel"));
@@ -2494,6 +2638,11 @@
       }[char]));
     }
 
+    window.addEventListener("storage", event => {
+      if (event.key === STORE_KEY && session.role) refreshLiveData();
+    });
+
+    lastDbSignature = dataSignature();
     initLanding();
     initUserEvents();
     renderTopActions();

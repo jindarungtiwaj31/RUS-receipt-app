@@ -8,9 +8,13 @@ create table if not exists public.profiles (
   role text not null check (role in ('admin', 'user')),
   display_name text not null,
   staff_code text,
+  active boolean not null default true,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+alter table public.profiles
+add column if not exists active boolean not null default true;
 
 create table if not exists public.app_state (
   id text primary key default 'main',

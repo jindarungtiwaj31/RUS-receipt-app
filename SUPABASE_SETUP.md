@@ -37,13 +37,21 @@
 หลังสร้าง user แล้ว ให้คัดลอก `User UID` ของแต่ละคนจากหน้า Authentication แล้วเพิ่มข้อมูลใน SQL Editor:
 
 ```sql
-insert into public.profiles (user_id, role, display_name, staff_code)
+insert into public.profiles (user_id, role, display_name, staff_code, active)
 values
-  ('USER_UID_ADMIN', 'admin', 'ชื่อผู้ดูแลระบบ', 'A001'),
-  ('USER_UID_USER', 'user', 'ชื่อเจ้าหน้าที่ออกใบเสร็จ', '1001');
+  ('USER_UID_ADMIN', 'admin', 'ชื่อผู้ดูแลระบบ', 'A001', true),
+  ('USER_UID_USER', 'user', 'ชื่อเจ้าหน้าที่ออกใบเสร็จ', '1001', true);
 ```
 
 เปลี่ยน `USER_UID_ADMIN` และ `USER_UID_USER` เป็น UID จริงจาก Supabase
+
+ถ้าต้องการปิดบัญชีไม่ให้เข้าใช้งาน ให้เปลี่ยน `active` เป็น `false`:
+
+```sql
+update public.profiles
+set active = false
+where user_id = 'USER_UID_USER';
+```
 
 ## 5. ใส่ค่าเชื่อมต่อในเว็บ
 
