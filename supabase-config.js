@@ -3,6 +3,55 @@ window.RECEIPT_APP_SUPABASE = {
   anonKey: "sb_publishable_Bm_Du48iTUZqsHhMH1N7tg_scBCQ1Lp"
 };
 
+// User login rule:
+// User can enter the system with only a 4-digit code created by Admin.
+// No default/demo User code should be available before Admin creates it.
+window.RECEIPT_APP_REQUIRE_ADMIN_CREATED_USER = true;
+
+(function removeDefaultDemoUserCode() {
+  const key = "rus_receipt_v5";
+  const isDemoUser = (u) => u && u.code === "1001" && u.name === "เจ้าหน้าที่รับเงิน";
+
+  function cleanStateData(data) {
+    if (!data || !Array.isArray(data.users)) return { data, changed: false };
+    const users = data.users.filter((u) => !isDemoUser(u));
+    const changed = users.length !== data.users.length;
+    return changed ? { data: { ...data, users }, changed } : { data, changed: false };
+  }
+
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) {
+      localStorage.setItem(key, JSON.stringify({ users: [] }));
+    } else {
+      const result = cleanStateData(JSON.parse(raw));
+      if (result.changed) localStorage.setItem(key, JSON.stringify(result.data));
+    }
+  } catch (err) {
+    console.warn("Cannot clean local default user", err);
+  }
+
+  async function cleanRemoteState() {
+    const cfg = window.RECEIPT_APP_SUPABASE || {};
+    if (!cfg.url || !cfg.anonKey || !window.supabase) return;
+
+    try {
+      const client = window.supabase.createClient(cfg.url, cfg.anonKey);
+      const res = await client.from("app_state").select("data").eq("id", "main").single();
+      if (res.error || !res.data || !res.data.data) return;
+
+      const result = cleanStateData(res.data.data);
+      if (result.changed) {
+        await client.from("app_state").upsert({ id: "main", data: result.data });
+      }
+    } catch (err) {
+      console.warn("Cannot clean remote default user", err);
+    }
+  }
+
+  window.addEventListener("load", () => setTimeout(cleanRemoteState, 800));
+})();
+
 // Receipt print assets
 // Loaded here because index.html already imports this file before the app code.
 window.RECEIPT_APP_ASSETS = {
