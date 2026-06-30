@@ -1,20 +1,29 @@
--- RMUTSB Receipt App - Supabase setup
+-- RMUTSB Receipt App - Supabase central database
 -- Run this file in Supabase SQL Editor.
+-- Static HTML/CSS/JavaScript app stores shared app_state and uses RPC functions
+-- for atomic receipt numbering when many computers issue receipts at the same time.
 
 create extension if not exists pgcrypto;
 
 create table if not exists public.profiles (
-  user_id uuid primary key references auth.users(id) on delete cascade,
+  id uuid primary key default gen_random_uuid(),
   role text not null check (role in ('admin', 'user')),
-  display_name text not null,
+  username text,
   staff_code text,
+  display_name text not null,
+  password_hash text,
   active boolean not null default true,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
 
-alter table public.profiles
-add column if not exists active boolean not null default true;
+alter table public.profiles add column if not exists username text;
+alter table public.profiles add column if not exists staff_code text;
+alter table public.profiles add column if not exists display_name text;
+alter table public.profiles add column if not exists password_hash text;
+alter table public.profiles add column if not exists active boolean not null default true;
+alter table public.profiles add column if not exists created_at timestamptz not null default now();
+alter table public.profiles add column if not exists updated_at timestamptz not null default now();
 
 create table if not exists public.app_state (
   id text primary key default 'main',
@@ -22,59 +31,36 @@ create table if not exists public.app_state (
   updated_at timestamptz not null default now()
 );
 
-alter table public.profiles enable row level security;
-alter table public.app_state enable row level security;
-
-drop policy if exists "authenticated can read profiles" on public.profiles;
-create policy "authenticated can read profiles"
-on public.profiles
-for select
-to authenticated
-using (true);
-
-drop policy if exists "authenticated can read app state" on public.app_state;
-create policy "authenticated can read app state"
-on public.app_state
-for select
-to authenticated
-using (true);
-
-drop policy if exists "authenticated can insert app state" on public.app_state;
-create policy "authenticated can insert app state"
-on public.app_state
-for insert
-to authenticated
-with check (true);
-
-drop policy if exists "authenticated can update app state" on public.app_state;
-create policy "authenticated can update app state"
-on public.app_state
-for update
-to authenticated
-using (true)
-with check (true);
+create table if not exists public.cancel_receipt_log (
+  id uuid primary key default gen_random_uuid(),
+  receipt_id text not null,
+  reason text not null,
+  cancelled_at timestamptz not null default now()
+);
 
 insert into public.app_state (id, data)
 values (
   'main',
   '{
-    "admin": {"username": "", "password": ""},
-    "users": [],
-    "titles": ["นาย", "นาง", "นางสาว", "ดร.", "ผู้ช่วยศาสตราจารย์"],
-    "paymentItems": ["ค่าลงทะเบียน", "ค่าธรรมเนียมการศึกษา", "ค่าบำรุงการศึกษา", "ค่าปรับ"],
+    "orgName": "มหาวิทยาลัยเทคโนโลยีราชมงคลสุวรรณภูมิ",
+    "orgAddress": "ที่อยู่มหาวิทยาลัย / ปรับแก้ข้อความนี้ในเมนูระบบ",
+    "position": "เจ้าหน้าที่ผู้รับชำระเงิน",
+    "users": [
+      {"code": "1001", "name": "เจ้าหน้าที่รับเงิน", "active": true}
+    ],
+    "titles": ["นาย", "นาง", "นางสาว", "ดร.", "อื่นๆ"],
+    "items": ["ค่าลงทะเบียน", "ค่าธรรมเนียมธนาคาร", "ค่าบำรุงการศึกษา"],
     "projects": [
+      {"name": "ไม่ระบุโครงการ", "active": true},
       {"name": "โครงการบริการวิชาการ", "active": true},
-      {"name": "โครงการอบรมระยะสั้น", "active": true},
-      {"name": "ศูนย์พระนครศรีอยุธยา หันตรา", "active": true},
-      {"name": "ไม่ระบุโครงการ", "active": true}
+      {"name": "โครงการอบรมระยะสั้น", "active": true}
     ],
     "payerBanks": ["ธนาคารกรุงไทย", "ธนาคารไทยพาณิชย์", "ธนาคารกสิกรไทย", "ธนาคารกรุงเทพ"],
-    "universityBanks": [
-      {"bank": "ธนาคารกรุงไทย", "accountName": "มหาวิทยาลัยเทคโนโลยีราชมงคลสุวรรณภูมิ", "accountNo": "123-4-56789-0"},
-      {"bank": "ธนาคารกรุงเทพ", "accountName": "RMUTSB", "accountNo": "987-6-54321-0"}
+    "uniBanks": [
+      {"id": "bank1", "bank": "ธนาคารกรุงไทย", "name": "มหาวิทยาลัยเทคโนโลยีราชมงคลสุวรรณภูมิ", "no": "000-0-00000-0", "active": true}
     ],
     "books": [
-      {"bookNo": "2567A", "start": 1, "end": 500, "latest": 0, "active": true, "closed": false}
+      {"id": "book1", "bookNo": "2569-001", "start": 1, "end": 500, "latest": 0, "active": true, "closed": false}
     ],
     "receipts": []
   }'::jsonb
@@ -101,6 +87,61 @@ create trigger app_state_touch_updated_at
 before update on public.app_state
 for each row execute function public.touch_updated_at();
 
+alter table public.profiles enable row level security;
+alter table public.app_state enable row level security;
+alter table public.cancel_receipt_log enable row level security;
+
+drop policy if exists "read app state" on public.app_state;
+create policy "read app state"
+on public.app_state
+for select
+to anon, authenticated
+using (true);
+
+drop policy if exists "insert app state" on public.app_state;
+create policy "insert app state"
+on public.app_state
+for insert
+to anon, authenticated
+with check (true);
+
+drop policy if exists "update app state" on public.app_state;
+create policy "update app state"
+on public.app_state
+for update
+to anon, authenticated
+using (true)
+with check (true);
+
+drop policy if exists "read profiles" on public.profiles;
+create policy "read profiles"
+on public.profiles
+for select
+to anon, authenticated
+using (true);
+
+drop policy if exists "write profiles" on public.profiles;
+create policy "write profiles"
+on public.profiles
+for all
+to anon, authenticated
+using (true)
+with check (true);
+
+drop policy if exists "read cancel log" on public.cancel_receipt_log;
+create policy "read cancel log"
+on public.cancel_receipt_log
+for select
+to anon, authenticated
+using (true);
+
+drop policy if exists "insert cancel log" on public.cancel_receipt_log;
+create policy "insert cancel log"
+on public.cancel_receipt_log
+for insert
+to anon, authenticated
+with check (true);
+
 create or replace function public.issue_receipt(p_receipt jsonb)
 returns jsonb
 language plpgsql
@@ -120,10 +161,6 @@ declare
   v_next integer;
   v_receipt jsonb;
 begin
-  if auth.uid() is null then
-    raise exception 'กรุณาเข้าสู่ระบบก่อนออกใบเสร็จ';
-  end if;
-
   select data into v_state
   from public.app_state
   where id = 'main'
@@ -154,11 +191,16 @@ begin
 
   v_book := v_books->v_active_index;
   v_start := greatest(1, coalesce((v_book->>'start')::integer, 1));
-  v_end := least(500, greatest(v_start, coalesce((v_book->>'end')::integer, 500)));
+  v_end := greatest(v_start, coalesce((v_book->>'end')::integer, 500));
+
+  if v_end - v_start + 1 > 500 then
+    raise exception '1 เล่มใบเสร็จต้องไม่เกิน 500 เลข';
+  end if;
+
   v_latest := greatest(0, coalesce((v_book->>'latest')::integer, 0));
   v_next := greatest(v_start, v_latest + 1);
 
-  if v_next > v_end or v_next > 500 then
+  if v_next > v_end then
     raise exception 'เล่มนี้ออกเลขครบแล้ว กรุณาเลือกเล่มใหม่';
   end if;
 
@@ -168,10 +210,10 @@ begin
       'bookNo', v_book->>'bookNo',
       'receiptNo', lpad(v_next::text, 3, '0')
     );
+
   v_receipts := coalesce(v_state->'receipts', '[]'::jsonb) || jsonb_build_array(v_receipt);
   v_state := jsonb_set(v_state, '{books}', v_books, true);
   v_state := jsonb_set(v_state, '{receipts}', v_receipts, true);
-  v_state := jsonb_set(v_state, '{admin}', '{"username":"","password":""}'::jsonb, true);
 
   update public.app_state
   set data = v_state
@@ -194,10 +236,6 @@ declare
   v_index integer;
   v_found boolean := false;
 begin
-  if auth.uid() is null then
-    raise exception 'กรุณาเข้าสู่ระบบก่อนยกเลิกใบเสร็จ';
-  end if;
-
   if coalesce(trim(p_reason), '') = '' then
     raise exception 'กรุณาระบุหมายเหตุการยกเลิก';
   end if;
@@ -220,7 +258,11 @@ begin
   for v_index in 0..jsonb_array_length(v_receipts) - 1 loop
     v_receipt := v_receipts->v_index;
     if v_receipt->>'id' = p_receipt_id then
-      v_receipt := v_receipt || jsonb_build_object('status', 'ยกเลิก', 'cancelReason', p_reason);
+      v_receipt := v_receipt || jsonb_build_object(
+        'status', 'ยกเลิก',
+        'cancelReason', p_reason,
+        'cancelledAt', now()
+      );
       v_receipts := jsonb_set(v_receipts, array[v_index::text], v_receipt, false);
       v_found := true;
       exit;
@@ -231,7 +273,11 @@ begin
     raise exception 'ไม่พบใบเสร็จที่ต้องการยกเลิก';
   end if;
 
+  insert into public.cancel_receipt_log (receipt_id, reason)
+  values (p_receipt_id, p_reason);
+
   v_state := jsonb_set(v_state, '{receipts}', v_receipts, true);
+
   update public.app_state
   set data = v_state
   where id = 'main';
@@ -240,5 +286,14 @@ begin
 end;
 $$;
 
-grant execute on function public.issue_receipt(jsonb) to authenticated;
-grant execute on function public.cancel_receipt(text, text) to authenticated;
+grant usage on schema public to anon, authenticated;
+grant select, insert, update on public.app_state to anon, authenticated;
+grant select, insert, update, delete on public.profiles to anon, authenticated;
+grant select, insert on public.cancel_receipt_log to anon, authenticated;
+grant execute on function public.issue_receipt(jsonb) to anon, authenticated;
+grant execute on function public.cancel_receipt(text, text) to anon, authenticated;
+
+-- Security note:
+-- This schema supports a static HTML app and shared database quickly.
+-- For production-grade security, move login validation to Supabase Auth or an Edge Function
+-- and restrict RLS policies per role instead of allowing anon write access.
