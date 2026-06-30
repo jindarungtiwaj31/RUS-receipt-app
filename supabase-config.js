@@ -3,9 +3,6 @@ window.RECEIPT_APP_SUPABASE = {
   anonKey: "sb_publishable_Bm_Du48iTUZqsHhMH1N7tg_scBCQ1Lp"
 };
 
-// User login rule:
-// User can enter the system with only a 4-digit code created by Admin.
-// No default/demo User code should be available before Admin creates it.
 window.RECEIPT_APP_REQUIRE_ADMIN_CREATED_USER = true;
 
 (function removeDefaultDemoUserCode() {
@@ -52,6 +49,27 @@ window.RECEIPT_APP_REQUIRE_ADMIN_CREATED_USER = true;
   window.addEventListener("load", () => setTimeout(cleanRemoteState, 800));
 })();
 
+(function fixBrokenInlineScriptOnGitHubPages() {
+  async function repairAndRun() {
+    if (typeof window.doLogin === "function" && typeof window.drawLogin === "function") return;
+    try {
+      const html = await fetch("index.html?fix=" + Date.now(), { cache: "no-store" }).then((r) => r.text());
+      const match = html.match(/<script>\s*const KEY[\s\S]*?<\/script>/);
+      if (!match) return;
+      let code = match[0].replace(/^<script>/, "").replace(/<\/script>$/, "");
+      code = code.replace(/join\('\s*\n\s*'\)/g, "join('\\n')");
+      code = code.replace("users:[{code:'1001',name:'เจ้าหน้าที่รับเงิน',active:true}]", "users:[]");
+      (0, eval)(code);
+      if (typeof window.drawLogin === "function") window.drawLogin();
+    } catch (err) {
+      console.error("Runtime repair failed", err);
+      alert("ระบบโหลดไม่สมบูรณ์ กรุณากด Ctrl+F5 หรือเปิดด้วย Chrome/Edge เวอร์ชันล่าสุด");
+    }
+  }
+
+  window.addEventListener("DOMContentLoaded", () => setTimeout(repairAndRun, 150));
+})();
+
 // Receipt print assets
 // Loaded here because index.html already imports this file before the app code.
 window.RECEIPT_APP_ASSETS = {
@@ -68,7 +86,8 @@ window.RECEIPT_APP_ASSETS = {
   const style = document.createElement("style");
   style.id = "receipt-logo-assets";
   style.textContent = `
-    .logo {
+    .logo,
+    .seal {
       background: #fff url("${watermark}") center/82% auto no-repeat !important;
       color: transparent !important;
       text-indent: -9999px !important;
@@ -83,7 +102,8 @@ window.RECEIPT_APP_ASSETS = {
       overflow: hidden !important;
     }
 
-    .wm {
+    .wm,
+    .receipt-watermark {
       inset: 64mm 0 0 !important;
       height: 70mm !important;
       background: transparent url("${watermark}") center top/50mm auto no-repeat !important;
@@ -97,7 +117,11 @@ window.RECEIPT_APP_ASSETS = {
     .page .rhead,
     .page p,
     .page .rtab,
-    .page .right {
+    .page .right,
+    .receipt-page .receipt-head,
+    .receipt-page .payer-block,
+    .receipt-page .receipt-table,
+    .receipt-page .receipt-footer {
       position: relative;
       z-index: 1;
     }
